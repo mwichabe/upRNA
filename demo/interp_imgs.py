@@ -8,6 +8,7 @@ import numpy as np
 import math
 from importlib import import_module
 
+from torch import nn
 from torch.nn import functional as F
 from core.utils import flow_viz
 from core.pipeline import Pipeline
@@ -18,7 +19,100 @@ warnings.filterwarnings("ignore")
 # os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# Define the Multimodal Module
+class MultimodalModule(nn.Module):
+    def __init__(self, input_size, output_size):
+        super(MultimodalModule, self).__init__()
+        self.fc = nn.Linear(input_size, output_size)
+        self.relu = nn.ReLU()
 
+    def forward(self, x1, x2):
+        # multimodal fusion logic
+        x = torch.cat((x1, x2), dim=1)
+        x = self.fc(x)
+        x = self.relu(x)
+        return x
+# Define the Adaptive Module
+class AdaptiveModule(nn.Module):
+    def __init__(self, input_size, output_size):
+        super(AdaptiveModule, self).__init__()
+        self.fc = nn.Linear(input_size, output_size)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        # Adaptive logic with activation
+        x = self.fc(x)
+        x = self.relu(x)
+        return x
+
+# Define the enhanced UPR-Net
+class UPRNetBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(UPRNetBlock, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.relu(x)
+        x = self.conv2(x)
+        x = self.relu(x)
+        return x
+
+class UPRNet(nn.Module):
+    def __init__(self, in_channels, out_channels, multimodal=True, adaptive=True):
+        super(UPRNet, self).__init__()
+
+        # Define encoder blocks
+        self.encoder_block1 = UPRNetBlock(in_channels, 64)
+        self.encoder_block2 = UPRNetBlock(64, 128)
+        self.encoder_block3 = UPRNetBlock(128, 256)
+
+        # Define decoder blocks
+        self.decoder_block3 = UPRNetBlock(256, 128)
+        self.decoder_block2 = UPRNetBlock(128, 64)
+        self.decoder_block1 = UPRNetBlock(64, out_channels)
+
+        # If multimodal is True, add the MultimodalModule
+        if multimodal:
+            # Adjust input_size and output_size based on your UPR-Net architecture
+            self.multimodal_module = MultimodalModule(input_size=out_channels, output_size=out_channels)
+
+        # If adaptive is True, add the AdaptiveModule
+        if adaptive:
+            # Adjust input_size and output_size based on your UPR-Net architecture
+            self.adaptive_module = AdaptiveModule(input_size=out_channels, output_size=out_channels)
+
+    def forward(self, x1, x2):
+        # Implement the forward pass of UPR-Net
+        # Example: U-Net style architecture
+        x1_e1 = self.encoder_block1(x1)
+        x1_e2 = self.encoder_block2(x1_e1)
+        x1_e3 = self.encoder_block3(x1_e2)
+
+        x2_e1 = self.encoder_block1(x2)
+        x2_e2 = self.encoder_block2(x2_e1)
+        x2_e3 = self.encoder_block3(x2_e2)
+
+        # Perform some fusion logic between x1 and x2 (this can be modified based on your requirements)
+        fused_representation = x1_e3 + x2_e3
+
+        x2_d3 = self.decoder_block3(fused_representation)
+        x2_d2 = self.decoder_block2(x2_d3)
+        x2_d1 = self.decoder_block1(x2_d2)
+
+        # If multimodal is True, use the MultimodalModule
+        if hasattr(self, 'multimodal_module'):
+            fused_representation = self.multimodal_module(fused_representation, x2_d1)
+            # Modify fused_representation based on your UPR-Net architecture
+
+        # If adaptive is True, use the AdaptiveModule
+        if hasattr(self, 'adaptive_module'):
+            fused_representation = self.adaptive_module(fused_representation)
+            # Modify fused_representation based on your UPR-Net architecture
+
+        return fused_representation
 def init_exp_env():
     if not os.path.exists(SAVE_DIR):
         os.makedirs(SAVE_DIR)
@@ -136,7 +230,9 @@ if __name__ == "__main__":
     model_cfg_dict = dict(
             load_pretrain = True,
             model_size = args.model_size,
-            model_file = args.model_file
+            model_file = args.model_file,
+            multimodal = True,
+            adaptive = True
             )
 
     ppl = Pipeline(model_cfg_dict)
