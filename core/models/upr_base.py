@@ -252,23 +252,28 @@ class SynthesisNetwork(nn.Module):
             flow_0t_1t = torch.cat((flow_0t, flow_1t), 1)
             return warped_img0, warped_img1, warped_c0, warped_c1, flow_0t_1t
 
-    def forward(self, last_i, i0, i1, c0_pyr, c1_pyr, bi_flow_pyr,
+    def forward(self, last_i_rgb, i0_rgb, i1_rgb, last_i_depth, i0_depth, i1_depth, c0_pyr_rgb, c1_pyr_rgb,
+                c0_pyr_depth, c1_pyr_depth, bi_flow_pyr,
                 time_period=0.5, cross_att=None):
-        warped_img0, warped_img1, warped_c0, warped_c1, flow_0t_1t = \
+        warped_img0_rgb, warped_img0_depth, warped_img1_depth, warped_img1_rgb, warped_c0, warped_c1, flow_0t_1t_rgb, flow_0t_1t_depth = \
             self.get_warped_representations(
-                bi_flow_pyr[0], c0_pyr[0], c1_pyr[0], i0, i1,
+                bi_flow_pyr[0], c0_pyr_rgb[0], c1_pyr_rgb[0], i0_rgb, i1_rgb, c0_pyr_depth[0], c1_pyr_depth[0],
+                i0_depth, i1_depth,
                 time_period=time_period)
-        input_feat = torch.cat(
-            (last_i, warped_img0, warped_img1, i0, i1, flow_0t_1t), 1)
+
+        # Adapted for multimodal fusion
+        input_feat_rgb = torch.cat((last_i_rgb, warped_img0_rgb, warped_img1_rgb, i0_rgb, i1_rgb, flow_0t_1t_rgb), 1)
+        input_feat_depth = torch.cat(
+            (last_i_depth, warped_img0_depth, warped_img1_depth, i0_depth, i1_depth, flow_0t_1t_depth), 1)
+        input_feat = torch.cat((input_feat_rgb, input_feat_depth), 1)
+
         s0 = self.encoder_conv(input_feat)
         s1 = self.encoder_down1(torch.cat((s0, warped_c0, warped_c1), 1))
-        warped_c0, warped_c1 = self.get_warped_representations(
-            bi_flow_pyr[1], c0_pyr[1], c1_pyr[1],
-            time_period=time_period)
+
+        warped_c0, warped_c1, _ = self.get_warped_representations(
+            bi_flow_pyr[1], c0_pyr_rgb[1], c1_pyr_rgb[1], c0_pyr_depth[1], c1_pyr_depth[1], time_period=time_period)
         s2 = self.encoder_down2(torch.cat((s1, warped_c0, warped_c1), 1))
-        warped_c0, warped_c1 = self.get_warped_representations(
-            bi_flow_pyr[2], c0_pyr[2], c1_pyr[2],
-            time_period=time_period)
+
         # Add attention mechanism for feature fusion
         cross_att = self.self_attention(cross_att, cross_att)
 
@@ -282,8 +287,8 @@ class SynthesisNetwork(nn.Module):
         refine_res = torch.sigmoid(refine[:, :3]) * 2 - 1
         refine_mask0 = torch.sigmoid(refine[:, 3:4])
         refine_mask1 = torch.sigmoid(refine[:, 4:5])
-        merged_img = (warped_img0 * refine_mask0 * (1 - time_period) + \
-                      warped_img1 * refine_mask1 * time_period)
+        merged_img = (warped_img0_rgb * refine_mask0 * (1 - time_period) + \
+                      warped_img1_rgb * refine_mask1 * time_period)
         merged_img = merged_img / (refine_mask0 * (1 - time_period) + \
                                    refine_mask1 * time_period)
         interp_img = merged_img + refine_res
@@ -291,10 +296,9 @@ class SynthesisNetwork(nn.Module):
 
         extra_dict = {}
         extra_dict["refine_res"] = refine_res
-        extra_dict["warped_img0"] = warped_img0
-        extra_dict["warped_img1"] = warped_img1
+        extra_dict["warped_img0"] = warped_img0_rgb
+        extra_dict["warped_img1"] = warped_img1_rgb
         extra_dict["merged_img"] = merged_img
-
 
         return interp_img, extra_dict
 
@@ -308,17 +312,28 @@ class Model(nn.Module):
         self.pyr_level = pyr_level
         self.nr_lvl_skipped = nr_lvl_skipped
         # Enable UPR-Net to process multi-modal data and achieve adaptive frame
-        self.feat_pyramid = FeatPyramid()
+        self.feat_pyramid_rgb = FeatPyramid()
+        self.feat_pyramid_depth = FeatPyramid()
         self.motion_estimator = MotionEstimator()
         self.synthesis_network = SynthesisNetwork()
 
     def forward_one_lvl(self,
-                        img0, img1, last_feat, last_flow, last_interp=None,
+                        img0_rgb, img1_rgb, img0_depth, img1_depth, last_feat, last_flow, last_interp=None,
                         time_period=0.5, skip_me=False):
 
-        # context feature extraction
-        feat0_pyr = self.feat_pyramid(img0)
-        feat1_pyr = self.feat_pyramid(img1)
+        # context feature extraction for RGB images
+        feat0_pyr_rgb = self.feat_pyramid_rgb(img0_rgb)
+        feat1_pyr_rgb = self.feat_pyramid_rgb(img1_rgb)
+
+        # context feature extraction for depth images
+        feat0_pyr_depth = self.feat_pyramid_depth(img0_depth)
+        feat1_pyr_depth = self.feat_pyramid_depth(img1_depth)
+
+        # concatenated RGB and depth features
+        feat0_pyr = [torch.cat([rgb_feat, depth_feat], dim=1) for rgb_feat, depth_feat in
+                     zip(feat0_pyr_rgb, feat0_pyr_depth)]
+        feat1_pyr = [torch.cat([rgb_feat, depth_feat], dim=1) for rgb_feat, depth_feat in
+                     zip(feat1_pyr_rgb, feat1_pyr_depth)]
 
         # bi-directional flow estimation
         if not skip_me:
@@ -335,7 +350,7 @@ class Model(nn.Module):
             input=flow, scale_factor=4.0,
             mode="bilinear", align_corners=False)
 
-        ## consturct 3-level flow pyramid for synthesis network
+        ## construct 3-level flow pyramid for synthesis network
         bi_flow_pyr = []
         tmp_flow = ori_resolution_flow
         bi_flow_pyr.append(tmp_flow)
@@ -350,17 +365,17 @@ class Model(nn.Module):
             flow_0t = ori_resolution_flow[:, :2] * time_period
             flow_1t = ori_resolution_flow[:, 2:4] * (1 - time_period)
             warped_img0 = softsplat.FunctionSoftsplat(
-                tenInput=img0, tenFlow=flow_0t,
+                tenInput=img0_rgb, tenFlow=flow_0t,
                 tenMetric=None, strType='average')
             warped_img1 = softsplat.FunctionSoftsplat(
-                tenInput=img1, tenFlow=flow_1t,
+                tenInput=img1_rgb, tenFlow=flow_1t,
                 tenMetric=None, strType='average')
             last_interp = warped_img0 * (1 - time_period) \
                           + warped_img1 * time_period
 
         ## do synthesis
         interp_img, extra_dict = self.synthesis_network(
-            last_interp, img0, img1, feat0_pyr, feat1_pyr, bi_flow_pyr,
+            last_interp, img0_rgb, img1_rgb, feat0_pyr, feat1_pyr, bi_flow_pyr,
             time_period=time_period)
 
         return flow, feat, interp_img, extra_dict
