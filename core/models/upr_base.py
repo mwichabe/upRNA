@@ -252,50 +252,59 @@ class SynthesisNetwork(nn.Module):
             flow_0t_1t = torch.cat((flow_0t, flow_1t), 1)
             return warped_img0, warped_img1, warped_c0, warped_c1, flow_0t_1t
 
-    def forward(self, last_i, i0, i1, c0_pyr, c1_pyr, bi_flow_pyr,
-                time_period=0.5, cross_att=None):
-        warped_img0, warped_img1, warped_c0, warped_c1, flow_0t_1t = \
-            self.get_warped_representations(
-                bi_flow_pyr[0], c0_pyr[0], c1_pyr[0], i0, i1,
-                time_period=time_period)
-        input_feat = torch.cat(
-            (last_i, warped_img0, warped_img1, i0, i1, flow_0t_1t), 1)
-        s0 = self.encoder_conv(input_feat)
-        s1 = self.encoder_down1(torch.cat((s0, warped_c0, warped_c1), 1))
-        warped_c0, warped_c1 = self.get_warped_representations(
-            bi_flow_pyr[1], c0_pyr[1], c1_pyr[1],
-            time_period=time_period)
-        s2 = self.encoder_down2(torch.cat((s1, warped_c0, warped_c1), 1))
-        warped_c0, warped_c1 = self.get_warped_representations(
-            bi_flow_pyr[2], c0_pyr[2], c1_pyr[2],
-            time_period=time_period)
-        # Add attention mechanism for feature fusion
-        cross_att = self.self_attention(cross_att, cross_att)
-        print(cross_att.size())
-        print(s1.size())
-        x = self.decoder_up1(torch.cat((s2, warped_c0, warped_c1), 1))
-        adjusted_cross_att = cross_att[:, :3, :, :]
-        x = self.decoder_up2(torch.cat((adjusted_cross_att, s1), 1))
-        x = self.decoder_conv(torch.cat((x, s0), 1))
+    def forward(self, last_i_rgb, i0_rgb, i1_rgb, last_i_depth, i0_depth, i1_depth, c0_pyr_rgb, c1_pyr_rgb,
+                c0_pyr_depth, c1_pyr_depth, bi_flow_pyr, time_period=0.5, cross_att=0):
+        # Get warped representations for RGB
+        warped_img0_rgb, warped_img0_depth, warped_img1_depth, warped_img1_rgb, warped_c0, warped_c1, flow_0t_1t_rgb, flow_0t_1t_depth = \
+            self.get_warped_representations(bi_flow_pyr[0], c0_pyr_rgb[0], c1_pyr_rgb[0], i0_rgb, i1_rgb,
+                                            time_period=time_period)
 
-        # prediction
+        # Concatenate RGB input features
+        input_feat_rgb = torch.cat((last_i_rgb, warped_img0_rgb, warped_img1_rgb, i0_rgb, i1_rgb, flow_0t_1t_rgb), 1)
+
+        # Get warped representations for Depth
+        _, _, _, _, warped_c0_depth, warped_c1_depth, _, _ = \
+            self.get_warped_representations(bi_flow_pyr[0], c0_pyr_depth[0], c1_pyr_depth[0], i0_depth, i1_depth,
+                                            time_period=time_period)
+
+        # Concatenate Depth input features
+        input_feat_depth = torch.cat(
+            (last_i_depth, warped_img0_depth, warped_img1_depth, i0_depth, i1_depth, flow_0t_1t_depth), 1)
+
+        # Concatenate RGB and Depth input features
+        input_feat = torch.cat((input_feat_rgb, input_feat_depth), 1)
+
+        # Encoder layers
+        s0 = self.encoder_conv(input_feat)
+        s1 = self.encoder_down1(torch.cat((s0, warped_c0, warped_c1, warped_c0_depth, warped_c1_depth), 1))
+        s2 = self.encoder_down2(torch.cat((s1, warped_c0, warped_c1, warped_c0_depth, warped_c1_depth), 1))
+
+        # Attention mechanism for feature fusion
+        cross_att = self.self_attention(cross_att, cross_att)
+
+        # Adapted for multimodal fusion
+        x = self.decoder_up1(torch.cat((s2, warped_c0, warped_c1, warped_c0_depth, warped_c1_depth), 1))
+        x = self.decoder_up2(torch.cat((cross_att, s1), 1))
+
+        # Decoder and prediction
+        x = self.decoder_conv(torch.cat((x, s0), 1))
         refine = self.pred(x)
         refine_res = torch.sigmoid(refine[:, :3]) * 2 - 1
         refine_mask0 = torch.sigmoid(refine[:, 3:4])
         refine_mask1 = torch.sigmoid(refine[:, 4:5])
-        merged_img = (warped_img0 * refine_mask0 * (1 - time_period) + \
-                      warped_img1 * refine_mask1 * time_period)
-        merged_img /= refine_mask0 * (1 - time_period) + \
-                      refine_mask1 * time_period
+
+        # Merged image
+        merged_img = (warped_img0_rgb * refine_mask0 * (1 - time_period) + warped_img1_rgb * refine_mask1 * time_period)
+        merged_img = merged_img / (refine_mask0 * (1 - time_period) + refine_mask1 * time_period)
         interp_img = merged_img + refine_res
         interp_img = torch.clamp(interp_img, 0, 1)
 
+        # Extra information for analysis
         extra_dict = {}
         extra_dict["refine_res"] = refine_res
-        extra_dict["warped_img0"] = warped_img0
-        extra_dict["warped_img1"] = warped_img1
+        extra_dict["warped_img0"] = warped_img0_rgb
+        extra_dict["warped_img1"] = warped_img1_rgb
         extra_dict["merged_img"] = merged_img
-
 
         return interp_img, extra_dict
 
